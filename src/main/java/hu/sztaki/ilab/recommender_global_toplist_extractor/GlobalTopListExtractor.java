@@ -12,31 +12,28 @@ import org.apache.flink.api.java.tuple.Tuple4;
 import java.util.Random;
 
 public class GlobalTopListExtractor {
-	private static int feature_num;
-	private static long user_num;
-	private static long item_num;
-	private static int top_k;
 	
 	public static void main(String[] args) throws Exception {
 		final ExecutionEnvironment env = ExecutionEnvironment
 				.getExecutionEnvironment();
 		if(args.length == 4) {
-		feature_num = Integer.parseInt(args[0]);
-		user_num = Long.parseLong(args[1]);
-		item_num = Long.parseLong(args[2]);
-		top_k = Integer.parseInt(args[3]);
+		int feature_num = Integer.parseInt(args[0]);
+		long user_num = Long.parseLong(args[1]);
+		long item_num = Long.parseLong(args[2]);
+		int top_k = Integer.parseInt(args[3]);
 
 		DataSet<Long> user_id_list = env.generateSequence(0, user_num);
 		DataSet<Long> item_id_list = env.generateSequence(0, item_num);
-
-		user_id_list.print();
 		
 		DataSet<Tuple2<Long, double[]>> user_factors = user_id_list
-				.map(new FactorRandomGenerator());
+				.map(new FactorRandomGenerator(feature_num));
+		
 		DataSet<Tuple2<Long, double[]>> item_factors = item_id_list
-				.map(new FactorRandomGenerator());
+				.map(new FactorRandomGenerator(feature_num));
 		DataSet<Tuple3<Long, Long, Double>> predictions = user_factors.cross(
-				item_factors).with(new PredictionEvaluator());
+				item_factors).with(new PredictionEvaluator(feature_num));
+		
+		//predictions.first(top_k).print();
 
 		DataSet<Tuple4<Long, Long, Double, Integer>> top_list_for_users = predictions
 				.groupBy(0).sortGroup(2, Order.DESCENDING).first(top_k)
@@ -57,13 +54,18 @@ public class GlobalTopListExtractor {
 
 	public static final class FactorRandomGenerator implements
 			MapFunction<Long, Tuple2<Long, double[]>> {
-		public Tuple2<Long, double[]> output = new Tuple2<Long, double[]>();
+		private Tuple2<Long, double[]> output = new Tuple2<Long, double[]>();
+		private int feature_num;
+		
+		public FactorRandomGenerator(int feature_num) {
+			this.feature_num=feature_num;
+		}
 
 		@Override
 		public Tuple2<Long, double[]> map(Long value) throws Exception {
 			Random rnd = new Random();
 			double[] factors = new double[feature_num];
-			for (int i = 0; i < factors.length; i++) {
+			for (int i = 0; i < feature_num; i++) {
 				factors[i] = rnd.nextDouble();
 			}
 			output.setFields(value, factors);
@@ -74,8 +76,13 @@ public class GlobalTopListExtractor {
 	public static final class PredictionEvaluator
 			implements
 			CrossFunction<Tuple2<Long, double[]>, Tuple2<Long, double[]>, Tuple3<Long, Long, Double>> {
-		public Tuple3<Long, Long, Double> output = new Tuple3<Long, Long, Double>();
-
+		private Tuple3<Long, Long, Double> output = new Tuple3<Long, Long, Double>();
+		private int feature_num;
+		
+		public PredictionEvaluator(int feature_num) {
+			this.feature_num=feature_num;
+		}
+		
 		@Override
 		public Tuple3<Long, Long, Double> cross(
 				Tuple2<Long, double[]> user_factor,
@@ -92,7 +99,7 @@ public class GlobalTopListExtractor {
 	public static final class Appender
 			implements
 			MapFunction<Tuple3<Long, Long, Double>, Tuple4<Long, Long, Double, Integer>> {
-		public Tuple4<Long, Long, Double, Integer> output = new Tuple4<Long, Long, Double, Integer>();
+		private Tuple4<Long, Long, Double, Integer> output = new Tuple4<Long, Long, Double, Integer>();
 
 		@Override
 		public Tuple4<Long, Long, Double, Integer> map(
