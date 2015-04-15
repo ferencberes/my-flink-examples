@@ -1,112 +1,161 @@
 package hu.sztaki.ilab.recommender_global_toplist_extractor;
 
-import org.apache.flink.api.common.functions.CrossFunction;
-import org.apache.flink.api.common.functions.MapFunction;
+import java.util.Collection;
+import java.util.LinkedList;
+
 import org.apache.flink.api.common.operators.Order;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.ExecutionEnvironment;
+import org.apache.flink.api.java.operators.IterativeDataSet;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.api.java.tuple.Tuple4;
 
-import java.util.Random;
-
 public class GlobalTopListExtractor {
-	
+
 	public static void main(String[] args) throws Exception {
 		final ExecutionEnvironment env = ExecutionEnvironment
 				.getExecutionEnvironment();
-		if(args.length == 4) {
-		int feature_num = Integer.parseInt(args[0]);
-		long user_num = Long.parseLong(args[1]);
-		long item_num = Long.parseLong(args[2]);
-		int top_k = Integer.parseInt(args[3]);
+		if (args.length == 4) {
+			int feature_num = Integer.parseInt(args[0]);
+			long user_num = Long.parseLong(args[1]);
+			long item_num = Long.parseLong(args[2]);
+			int top_k = Integer.parseInt(args[3]);
 
-		DataSet<Long> user_id_list = env.generateSequence(0, user_num);
-		DataSet<Long> item_id_list = env.generateSequence(0, item_num);
-		
-		DataSet<Tuple2<Long, double[]>> user_factors = user_id_list
-				.map(new FactorRandomGenerator(feature_num));
-		
-		DataSet<Tuple2<Long, double[]>> item_factors = item_id_list
-				.map(new FactorRandomGenerator(feature_num));
-		DataSet<Tuple3<Long, Long, Double>> predictions = user_factors.cross(
-				item_factors).with(new PredictionEvaluator(feature_num));
-		
-		//predictions.first(top_k).print();
+			DataSet<Long> user_id_list = env.generateSequence(0, user_num)
+					.name("Generate user ids");
+			DataSet<Long> item_id_list = env.generateSequence(0, item_num)
+					.name("Generate item ids");
 
-		DataSet<Tuple4<Long, Long, Double, Integer>> top_list_for_users = predictions
-				.groupBy(0).sortGroup(2, Order.DESCENDING).first(top_k)
-				.map(new Appender());
+			DataSet<Tuple2<Long, double[]>> user_factors = user_id_list.map(
+					new FactorRandomGenerator(feature_num)).name(
+					"Generate random user factors");
 
-		DataSet<Tuple3<Long, Long, Double>> global_toplist = top_list_for_users
-				.groupBy(3).sortGroup(2, Order.DESCENDING).first(top_k)
-				.project(0, 1, 2);
+			DataSet<Tuple2<Long, double[]>> item_factors = item_id_list.map(
+					new FactorRandomGenerator(feature_num)).name(
+					"Generate random item factors");
 
-		global_toplist.print();		
-		
-		env.execute("GlobalTopListExtractor");
-		
+			DataSet<Tuple2<Integer, Double>> user_entities = user_factors
+					.flatMap(new EntityMapper());
+			DataSet<Tuple2<Integer, Double>> item_entities = item_factors
+					.flatMap(new EntityMapper());
+
+			DataSet<Tuple2<Integer, Double>> user_entity_upper = user_entities
+					.groupBy(0).max(1);
+			DataSet<Tuple2<Integer, Double>> user_entity_lower = user_entities
+					.groupBy(0).min(1);
+			DataSet<Tuple2<Integer, Double>> item_entity_upper = item_entities
+					.groupBy(0).max(1);
+			DataSet<Tuple2<Integer, Double>> item_entity_lower = item_entities
+					.groupBy(0).min(1);
+
+			// user_entity_lower.print();
+			// user_entity_upper.print();
+			// item_entity_lower.print();
+			// item_entity_upper.print();
+
+			DataSet<Tuple3<Long, Double, double[]>> user_factors_with_bound = user_factors
+					.map(new UpperBoundExtractor(feature_num))
+					.withBroadcastSet(item_entity_upper, "upper")
+					.withBroadcastSet(item_entity_lower, "lower")
+					.name("Extracting upper bounds for users");
+
+			DataSet<Tuple3<Long, Double, double[]>> item_factors_with_bound = item_factors
+					.map(new UpperBoundExtractor(feature_num))
+					.withBroadcastSet(user_entity_upper, "upper")
+					.withBroadcastSet(user_entity_lower, "lower")
+					.name("Extracting upper bounds for items");
+
+			// user_factors_with_bound.print();
+			// item_factors_with_bound.print();
+
+			LinkedList<Tuple4<Long, Long, Double, Integer>> list = new LinkedList<Tuple4<Long, Long, Double, Integer>>();
+			Tuple4<Long, Long, Double, Integer> default_prediction = new Tuple4<Long, Long, Double, Integer>(
+					-1L, -1L, -Double.MAX_VALUE, 0);
+			list.add(default_prediction);
+
+			DataSet<Tuple4<Long, Long, Double, Integer>> initial_top_k = env
+					.fromCollection((Collection<Tuple4<Long, Long, Double, Integer>>) list);
+			DataSet<IterationData> first_top_k = initial_top_k
+					.map(new TopKWrapper());
+			DataSet<IterationData> first_user_data = user_factors_with_bound
+					.map(new UserDataWrapper());
+
+			DataSet<IterationData> initial_data = first_top_k
+					.union(first_user_data);
+
+			initial_data.print();
+
+			IterativeDataSet<IterationData> iter_data = initial_data
+					.iterate((int) user_num);
+
+			DataSet<Tuple4<Long, Long, Double, Integer>> prev_top_k = iter_data
+					.flatMap(new TopKPredExtractor());
+			DataSet<Tuple3<Long, Double, double[]>> prev_users = iter_data
+					.flatMap(new UserDataExtractor());
+
+			DataSet<Tuple4<Long, Long, Double, Integer>> min_element_1 = prev_top_k
+					.min(2).name("Extracting top_k lower bound");
+
+			DataSet<Tuple3<Long, Double, double[]>> max_user = prev_users
+					.max(1).name("Get user with max upper bound");
+
+			// TODO: there is some null pointer exception here!!!
+			DataSet<Tuple4<Long, Long, Double, Integer>> top_k_partitions = item_factors_with_bound
+					.reduceGroup(new PartitionTopKExtractor(top_k, feature_num))
+					.withBroadcastSet(max_user, "max_user")
+					.withBroadcastSet(min_element_1, "lower_bound")
+					.name("Extract top_k for each partition");
+
+			// Note: group by on first id OK bc. this is top_k for only one user
+			DataSet<Tuple4<Long, Long, Double, Integer>> top_k_for_max_user = top_k_partitions
+					.groupBy(0).sortGroup(2, Order.DESCENDING).first(top_k)
+					.name("Extract top_k for max user");
+
+			// TODO: first line is the original: it is only temporary solution
+			// because of some bug!
+			// DataSet<Tuple4<Long, Long, Double, Integer>> next_top_k =
+			// top_k_for_max_user
+			DataSet<Tuple4<Long, Long, Double, Integer>> next_top_k = prev_top_k
+					.union(prev_top_k).groupBy(3)
+					.sortGroup(2, Order.DESCENDING).first(top_k)
+					.name("Update global top_k");
+
+			// TODO: az iter data-ba be kell csomagolni a min elemét a global
+			// toplist-nek, hogy ne kelljen x2 minimumot keresni!!!
+			// vagy valami iteráció változóba elmenteni!!!
+			DataSet<Tuple4<Long, Long, Double, Integer>> min_element2 = next_top_k
+					.min(2).name("Extracting top_k lower bound");
+
+			DataSet<Tuple3<Long, Double, double[]>> next_user_data = prev_users
+					.filter(new UserFilter())
+					.withBroadcastSet(min_element2, "lower_bound")
+					.withBroadcastSet(max_user, "max_user")
+					.name("Filter users for next iteration");
+
+			DataSet<IterationData> wrapped_next_top_k = next_top_k
+					.map(new TopKWrapper());
+			DataSet<IterationData> wrapped_next_user_data = next_user_data
+					.map(new UserDataWrapper());
+
+			DataSet<IterationData> next_iter_data = wrapped_next_top_k
+					.union(wrapped_next_user_data);
+
+			// termination criteria: there is no UserData left in the iteration
+			// dataset.
+			first_top_k = iter_data.closeWith(next_iter_data,
+					next_iter_data.flatMap(new UserDataExtractor()));
+
+			DataSet<Tuple3<Long, Long, Double>> global_top_k = first_top_k
+					.flatMap(new TopKPredExtractor()).project(0, 1, 2);
+			global_top_k.print();
+
+			env.execute("GlobalTopListExtractor");
+			// System.out.println(env.getExecutionPlan());
+
 		} else {
-			System.out.println("Usage: <feature_num> <user_num> <item_num> <top_k>");
+			System.out
+					.println("Usage: <feature_num> <user_num> <item_num> <top_k>");
 		}
-	}
-
-	public static final class FactorRandomGenerator implements
-			MapFunction<Long, Tuple2<Long, double[]>> {
-		private Tuple2<Long, double[]> output = new Tuple2<Long, double[]>();
-		private int feature_num;
-		
-		public FactorRandomGenerator(int feature_num) {
-			this.feature_num=feature_num;
-		}
-
-		@Override
-		public Tuple2<Long, double[]> map(Long value) throws Exception {
-			Random rnd = new Random();
-			double[] factors = new double[feature_num];
-			for (int i = 0; i < feature_num; i++) {
-				factors[i] = rnd.nextDouble();
-			}
-			output.setFields(value, factors);
-			return output;
-		}
-	}
-
-	public static final class PredictionEvaluator
-			implements
-			CrossFunction<Tuple2<Long, double[]>, Tuple2<Long, double[]>, Tuple3<Long, Long, Double>> {
-		private Tuple3<Long, Long, Double> output = new Tuple3<Long, Long, Double>();
-		private int feature_num;
-		
-		public PredictionEvaluator(int feature_num) {
-			this.feature_num=feature_num;
-		}
-		
-		@Override
-		public Tuple3<Long, Long, Double> cross(
-				Tuple2<Long, double[]> user_factor,
-				Tuple2<Long, double[]> item_factor) throws Exception {
-			double sum = 0.0;
-			for (int i = 0; i < feature_num; i++) {
-				sum += user_factor.f1[i] * item_factor.f1[i];
-			}
-			output.setFields(user_factor.f0, item_factor.f0, sum);
-			return output;
-		}
-	}
-
-	public static final class Appender
-			implements
-			MapFunction<Tuple3<Long, Long, Double>, Tuple4<Long, Long, Double, Integer>> {
-		private Tuple4<Long, Long, Double, Integer> output = new Tuple4<Long, Long, Double, Integer>();
-
-		@Override
-		public Tuple4<Long, Long, Double, Integer> map(
-				Tuple3<Long, Long, Double> value) throws Exception {
-			output.setFields(value.f0, value.f1, value.f2, 1);
-			return output;
-		}
-
 	}
 }
