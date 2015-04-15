@@ -1,10 +1,11 @@
 package hu.sztaki.ilab.recommender_global_toplist_extractor;
 
+import java.io.Serializable;
 import java.util.Comparator;
 
 import org.apache.flink.api.java.tuple.Tuple4;
 
-public class PredictionComparator implements Comparator<Tuple4<Long, Long, Double, Integer>> {
+public class PredictionComparator implements Comparator<Tuple4<Long, Long, Double, Integer>>, Serializable {
 	
 	@Override
 	public int compare(Tuple4<Long, Long, Double, Integer> o1,

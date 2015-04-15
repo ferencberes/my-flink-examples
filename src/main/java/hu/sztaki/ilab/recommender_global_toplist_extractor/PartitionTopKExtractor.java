@@ -22,8 +22,11 @@ public class PartitionTopKExtractor
 	public PartitionTopKExtractor(int top_k, int feature_num) {
 		this.top_k = top_k;
 		this.feature_num = feature_num;
+
+		// TODO: I made the comparator Serializabel but is it really
+		// serializable this way???
 		this.minHeap = new PriorityQueue<Tuple4<Long, Long, Double, Integer>>(
-				this.top_k/*, new PredictionComparator()*/); // comparator is not serializiable!!!
+				this.top_k, new PredictionComparator());
 	}
 
 	@Override
@@ -47,20 +50,28 @@ public class PartitionTopKExtractor
 			throws Exception {
 		minHeap.clear();
 		for (Tuple3<Long, Double, double[]> element : items) {
-			if (element.f1 > lower_bound && element.f1 > minHeap.peek().f2) {
-				double sum = 0.0;
-				for (int i = 0; i < feature_num; i++) {
-					sum += element.f2[i] * max_user_factors[i];
-				}
-				Tuple4<Long, Long, Double, Integer> for_insert = new Tuple4<Long, Long, Double, Integer>(
-						max_user_id, element.f0, sum, 0);
-				if (minHeap.size() < top_k) {
-					minHeap.offer(for_insert);
-				} else {
-					if (sum > minHeap.peek().f2) {
-						minHeap.poll();
-						minHeap.offer(for_insert);
+			if (element.f1 > lower_bound) {
+				if (minHeap.size() >= top_k) {
+					if (element.f1 > minHeap.peek().f2) {
+						double sum = 0.0;
+						for (int i = 0; i < feature_num; i++) {
+							sum += element.f2[i] * max_user_factors[i];
+						}
+						Tuple4<Long, Long, Double, Integer> for_insert = new Tuple4<Long, Long, Double, Integer>(
+								max_user_id, element.f0, sum, 0);
+						if (sum > minHeap.peek().f2) {
+							minHeap.poll();
+							minHeap.add(for_insert);
+						}
 					}
+				} else {
+					double sum = 0.0;
+					for (int i = 0; i < feature_num; i++) {
+						sum += element.f2[i] * max_user_factors[i];
+					}
+					Tuple4<Long, Long, Double, Integer> for_insert = new Tuple4<Long, Long, Double, Integer>(
+							max_user_id, element.f0, sum, 0);
+					minHeap.add(for_insert);
 				}
 			}
 		}

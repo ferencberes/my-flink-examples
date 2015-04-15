@@ -84,8 +84,6 @@ public class GlobalTopListExtractor {
 			DataSet<IterationData> initial_data = first_top_k
 					.union(first_user_data);
 
-			initial_data.print();
-
 			IterativeDataSet<IterationData> iter_data = initial_data
 					.iterate((int) user_num);
 
@@ -100,7 +98,6 @@ public class GlobalTopListExtractor {
 			DataSet<Tuple3<Long, Double, double[]>> max_user = prev_users
 					.max(1).name("Get user with max upper bound");
 
-			// TODO: there is some null pointer exception here!!!
 			DataSet<Tuple4<Long, Long, Double, Integer>> top_k_partitions = item_factors_with_bound
 					.reduceGroup(new PartitionTopKExtractor(top_k, feature_num))
 					.withBroadcastSet(max_user, "max_user")
@@ -112,11 +109,7 @@ public class GlobalTopListExtractor {
 					.groupBy(0).sortGroup(2, Order.DESCENDING).first(top_k)
 					.name("Extract top_k for max user");
 
-			// TODO: first line is the original: it is only temporary solution
-			// because of some bug!
-			// DataSet<Tuple4<Long, Long, Double, Integer>> next_top_k =
-			// top_k_for_max_user
-			DataSet<Tuple4<Long, Long, Double, Integer>> next_top_k = prev_top_k
+			DataSet<Tuple4<Long, Long, Double, Integer>> next_top_k = top_k_for_max_user
 					.union(prev_top_k).groupBy(3)
 					.sortGroup(2, Order.DESCENDING).first(top_k)
 					.name("Update global top_k");
@@ -151,7 +144,6 @@ public class GlobalTopListExtractor {
 			global_top_k.print();
 
 			env.execute("GlobalTopListExtractor");
-			// System.out.println(env.getExecutionPlan());
 
 		} else {
 			System.out
